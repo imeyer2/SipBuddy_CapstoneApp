@@ -364,8 +364,3 @@ xcodebuild test \
 This project is part of a university capstone program. See the repository for license details.
 
 ---
-
-<p align="center">
-  Built with care at Arizona State University<br/>
-  <strong>Because every sip should be safe.</strong>
-</p>
