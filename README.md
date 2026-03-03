@@ -1,7 +1,6 @@
 <p align="center">
-  <img src="CapstoneApp/CapstoneApp/Logos/SipBuddy_Logo.png" alt="SipBuddy Logo" width="180"/>
+  <img src="CapstoneApp/CapstoneApp/Logos/logo_with_white_background-2.png" alt="SipBuddy Logo" width="180"/>
 </p>
-
 <h1 align="center">SipBuddy</h1>
 
 <p align="center">
