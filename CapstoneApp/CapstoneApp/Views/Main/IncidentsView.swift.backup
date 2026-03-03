@@ -1,0 +1,465 @@
+
+
+// IncidentsView.swift — replace your current IncidentsView body with this version
+import SwiftUI
+
+struct IncidentsView: View {
+    @EnvironmentObject var ble: BLEManager
+    @EnvironmentObject var store: IncidentStore
+
+             HStack {
+            HStack {
+                ShareButton(images: images, complete: incident?.isComplete ?? false, id: incidentID)
+                Spacer()
+                // Reset zoom button
+                if scale > 1.0 {
+                    Button {
+                        withAnimation(.spring(response: 0.3)) {
+                            scale = 1.0
+                            lastScale = 1.0
+                            offset = .zero
+                            lastOffset = .zero
+                        }
+                    } label: {
+                        Label("Reset Zoom", systemImage: "arrow.up.left.and.arrow.down.right")
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Spacer()
+                Toggle(isOn: $isPlaying) { Text(mode == .loopForward ? "Playing" : "Pause on select").font(.caption) }
+                    .toggleStyle(SwitchToggleStyle(tint: .accentColor))
+                    .disabled(mode == .frameByFrame) // frame‑by‑frame doesn't auto‑advance
+            }
+        }
+        .padding()
+        .navigationTitle("Incident")
+        .onChange(of: images.count) { _, _ in frameIndex = min(frameIndex, max(0, images.count - 1)) }
+        .onReceive(Timer.publish(every: max(0.02, 1.0 / fps), on: .main, in: .common).autoconnect()) { _ in
+            guard mode == .loopForward, isPlaying, !images.isEmpty else { return }
+            frameIndex = (frameIndex + 1) % images.count // forward‑only loop
+        }
+    }
+
+    private func step(_ delta: Int) {
+        guard !images.isEmpty else { return }
+        frameIndex = (frameIndex + delta + images.count) % images.count
+    }
+}ShareButton(images: images, complete: incident?.isComplete ?? false, id: incidentID)
+                Spacer()
+                // Reset zoom button
+                if scale > 1.0 {
+                    Button {
+                        withAnimation(.spring(response: 0.3)) {
+                            scale = 1.0
+                            lastScale = 1.0
+                            offset = .zero
+                            lastOffset = .zero
+                        }
+                    } label: {
+                        Label("Reset Zoom", systemImage: "arrow.up.left.and.arrow.down.right")
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Spacer()
+                Toggle(isOn: $isPlaying) { Text(mode == .loopForward ? "Playing" : "Pause on select").font(.caption) }
+                    .toggleStyle(SwitchToggleStyle(tint: .accentColor))
+                    .disabled(mode == .frameByFrame) // frame‑by‑frame doesn't auto‑advance
+            }te private var editMode: EditMode = .inactive
+    @State private var selection: Set<UUID> = []
+    @State private var showClearAll = false
+
+    @State private var now = Date()
+    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                ManageBar(
+                    editMode: $editMode,
+                    selectionCount: editMode == .active ? selection.count : 0,
+                    onToggleEdit: { withAnimation { editMode = (editMode == .active ? .inactive : .active) } },
+                    onDeleteSelected: {
+                        store.delete(ids: selection)
+                        selection.removeAll()
+                        editMode = .inactive
+                    },
+                    onClearAll: { showClearAll = true }
+                )
+                Divider()
+
+                if editMode == .active {
+                    // Edit mode: selection enabled, no navigation
+                    List(selection: $selection) {
+                        ForEach(store.incidents) { inc in
+                            IncidentRow(incident: inc, now: now)
+                        }
+                        .onDelete { offsets in store.delete(at: offsets) }
+                    }
+                } else {
+                    // Normal mode: no selection binding → NavigationLink works
+                    List {
+                        ForEach(store.incidents) { inc in
+                            if inc.isReadyToOpen(now: now) {
+                                NavigationLink(value: inc.id) {
+                                    IncidentRow(incident: inc, now: now)
+                                        .contentShape(Rectangle()) // full-row hit area
+                                }
+                            } else {
+                                IncidentRow(incident: inc, now: now)
+                            }
+                        }
+                        .onDelete { offsets in store.delete(at: offsets) }
+                    }
+                }
+            }
+            .navigationTitle("Incidents")
+            .navigationDestination(for: UUID.self) { id in
+                IncidentDetail(incidentID: id)  // your existing player view
+            }
+            .confirmationDialog("Delete all incidents?",
+                                isPresented: $showClearAll,
+                                titleVisibility: .visible) {
+                Button("Delete All", role: .destructive) {
+                    store.deleteAll()
+                    selection.removeAll()
+                    editMode = .inactive
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+        }
+        .onReceive(ticker) { now = $0 }
+        .onChange(of: editMode) { _, newValue in
+            if newValue != .active { selection.removeAll() }  // ensure taps navigate again
+        }
+    }
+}
+
+
+
+
+// MARK: - Row
+private struct IncidentRow: View {
+    let incident: Incident
+    let now: Date
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                if let img = incident.previewImage {
+                    Image(uiImage: img)
+                        .resizable().scaledToFill()
+                        .frame(width: 64, height: 64).clipped()
+                        .cornerRadius(8)
+                } else {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.secondary.opacity(0.2))
+                        .frame(width: 64, height: 64)
+                        .overlay(Image(systemName: "photo"))
+                }
+
+                if !incident.isReadyToOpen(now: now) {
+                    VisualEffectBlur()
+                        .cornerRadius(8)
+                        .overlay(
+                            VStack(spacing: 4) {
+                                Text("Loading…").font(.caption).bold()
+                                Text("Please Wait").font(.caption2)
+                                if let s = incident.estimatedRemainingSeconds(now: now) {
+                                    Text("Estimated Wait: \(incident.mmss(s))")
+                                        .font(.caption2).monospacedDigit()
+                                } else {
+                                    Text("Estimated Wait: —:—").font(.caption2)
+                                }
+                            }
+                                .padding(6)
+                        )
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                if incident.isReadyToOpen(now: now) {
+                    // Ready state → show time, date (day month year), location
+                    Text(incident.formattedDateTime).bold()
+                    Text(incident.formattedLocation)
+                        .font(.caption).foregroundColor(.secondary)
+                    if !incident.isComplete {
+                        Text("Incomplete (stalled)")
+                            .font(.caption2).foregroundColor(.orange)
+                    }
+                } else {
+                    // Waiting state → mirrored text (also in overlay), but keep a small line here for accessibility
+                    Text("Loading…").bold()
+                    Text("Please Wait").font(.caption).foregroundColor(.secondary)
+                    if let s = incident.estimatedRemainingSeconds(now: now) {
+                        Text("Estimated Wait: \(incident.mmss(s))")
+                            .font(.caption2).foregroundColor(.secondary).monospacedDigit()
+                    }
+                }
+            }
+            Spacer()
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Detail Viewer
+private enum PlayerMode: String, CaseIterable, Identifiable { case loopForward = "Loop", frameByFrame = "Frame-by-frame"; var id: String { rawValue } }
+
+struct IncidentDetail: View {
+    @EnvironmentObject var ble: BLEManager
+    let incidentID: UUID
+
+    @State private var mode: PlayerMode = .loopForward
+    @State private var isPlaying: Bool = true
+    @State private var frameIndex: Int = 0
+    @State private var speedX: Double = 1.0  // 0.25× … 3×
+    
+    // Zoom state - shared across all frames (don't reset on frame change)
+    @State private var scale: CGFloat = 1.0
+    @State private var lastScale: CGFloat = 1.0
+    @State private var offset: CGPoint = .zero
+    @State private var lastOffset: CGPoint = .zero
+
+    private var baseFPS: Double { 30 }       // default 30 FPS
+    private var fps: Double { max(1, min(90, baseFPS * speedX)) }
+
+    private var incident: Incident? { ble.incidentStore.incidents.first { $0.id == incidentID } }
+    private var images: [UIImage] { (incident?.framesPNG ?? []).compactMap { UIImage(data: $0) } }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            // Mode toggle
+            Picker("Mode", selection: $mode) {
+                ForEach(PlayerMode.allCases) { m in Text(m.rawValue).tag(m) }
+            }
+            .pickerStyle(.segmented)
+
+            ZStack {
+                if images.indices.contains(frameIndex) {
+                    ZoomableImageView(
+                        image: images[frameIndex],
+                        scale: $scale,
+                        lastScale: $lastScale,
+                        offset: $offset,
+                        lastOffset: $lastOffset
+                    )
+                } else {
+                    RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.15)).overlay(Text("No frames yet"))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: 360)
+
+            if mode == .loopForward {
+                // Speed slider (no FPS slider, just speed multiple)
+                HStack {
+                    Image(systemName: "tortoise")
+                    Slider(value: $speedX, in: 0.25...3.0, step: 0.05)
+                    Image(systemName: "hare")
+                }
+                .padding(.horizontal)
+            } else {
+                // Frame-by-frame controls (no scrubber slider)
+                HStack(spacing: 16) {
+                    Button { step(-1) } label: { Image(systemName: "chevron.left").imageScale(.large) }
+                    Text("\(frameIndex + 1) / \(max(1, images.count))").monospacedDigit()
+                    Button { step(+1) } label: { Image(systemName: "chevron.right").imageScale(.large) }
+                }
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(images.indices, id: \.self) { idx in
+                            Image(uiImage: images[idx])
+                                .resizable().scaledToFill()
+                                .frame(width: 48, height: 48).clipped()
+                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(idx == frameIndex ? Color.accentColor : .clear, lineWidth: 2))
+                                .onTapGesture { frameIndex = idx }
+                        }
+                    }.padding(.horizontal)
+                }
+            }
+
+            HStack {
+                ShareButton(images: images, complete: incident?.isComplete ?? false, id: incidentID)
+                Spacer()
+                Toggle(isOn: $isPlaying) { Text(mode == .loopForward ? "Playing" : "Pause on select").font(.caption) }
+                    .toggleStyle(SwitchToggleStyle(tint: .accentColor))
+                    .disabled(mode == .frameByFrame) // frame‑by‑frame doesn’t auto‑advance
+            }
+        }
+        .padding()
+        .navigationTitle("Incident")
+        .onChange(of: images.count) { _, _ in frameIndex = min(frameIndex, max(0, images.count - 1)) }
+        .onReceive(Timer.publish(every: max(0.02, 1.0 / fps), on: .main, in: .common).autoconnect()) { _ in
+            guard mode == .loopForward, isPlaying, !images.isEmpty else { return }
+            frameIndex = (frameIndex + 1) % images.count // forward‑only loop
+        }
+    }
+
+    private func step(_ delta: Int) {
+        guard !images.isEmpty else { return }
+        frameIndex = (frameIndex + delta + images.count) % images.count
+    }
+}
+
+// MARK: - Zoomable Image View
+private struct ZoomableImageView: View {
+    let image: UIImage
+    @Binding var scale: CGFloat
+    @Binding var lastScale: CGFloat
+    @Binding var offset: CGPoint
+    @Binding var lastOffset: CGPoint
+    
+    @GestureState private var magnifyBy: CGFloat = 1.0
+    @GestureState private var dragOffset: CGPoint = .zero
+    
+    var body: some View {
+        GeometryReader { geometry in
+            let magnification = MagnificationGesture()
+                .updating($magnifyBy) { value, gestureState, _ in
+                    gestureState = value
+                }
+                .onEnded { value in
+                    scale = lastScale * value
+                    // Clamp scale between 1x and 5x
+                    scale = min(max(scale, 1.0), 5.0)
+                    lastScale = scale
+                    
+                    // Reset offset if zoomed out to 1x
+                    if scale == 1.0 {
+                        offset = .zero
+                        lastOffset = .zero
+                    }
+                }
+            
+            let drag = DragGesture()
+                .updating($dragOffset) { value, gestureState, _ in
+                    if scale > 1.0 {
+                        gestureState = CGPoint(
+                            x: value.translation.width,
+                            y: value.translation.height
+                        )
+                    }
+                }
+                .onEnded { value in
+                    if scale > 1.0 {
+                        offset.x = lastOffset.x + value.translation.width
+                        offset.y = lastOffset.y + value.translation.height
+                        
+                        // Limit panning to keep image in bounds
+                        let maxOffsetX = geometry.size.width * (scale - 1) / 2
+                        let maxOffsetY = geometry.size.height * (scale - 1) / 2
+                        
+                        offset.x = min(max(offset.x, -maxOffsetX), maxOffsetX)
+                        offset.y = min(max(offset.y, -maxOffsetY), maxOffsetY)
+                        
+                        lastOffset = offset
+                    }
+                }
+            
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .scaleEffect(lastScale * magnifyBy)
+                .offset(
+                    x: lastOffset.x + dragOffset.x,
+                    y: lastOffset.y + dragOffset.y
+                )
+                .gesture(magnification.simultaneously(with: drag))
+                .onTapGesture(count: 2) {
+                    // Double-tap to reset zoom
+                    withAnimation(.spring(response: 0.3)) {
+                        scale = 1.0
+                        lastScale = 1.0
+                        offset = .zero
+                        lastOffset = .zero
+                    }
+                }
+                .cornerRadius(10)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+// MARK: - Share (fixed: item-based sheet to avoid first-tap blank)
+private struct SharePayload: Identifiable { let id = UUID(); let items: [Any] }
+
+private struct ShareButton: View {
+    let images: [UIImage]
+    let complete: Bool
+    let id: UUID
+
+    @State private var shareItem: SharePayload? = nil
+
+    var body: some View {
+        Button {
+            // Build share items BEFORE presenting to avoid blank sheet
+            var items: [Any] = []
+
+            if !images.isEmpty {
+                if let gif = GIFEncoder.makeGIF(from: images, fps: 30) {
+                    let url = FileManager.default.temporaryDirectory.appendingPathComponent("incident_\(id).gif")
+                    if (try? gif.write(to: url)) != nil {
+                        items = [url]
+                    }
+                    else {
+                        items = [images[0]]
+                    }
+                }
+                else {
+                    items = [images[0]]
+                }
+            }
+
+            if !items.isEmpty {
+            shareItem = SharePayload(items: items)
+            }
+        } label: {
+            Label("Share", systemImage: "square.and.arrow.up")
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(images.isEmpty)
+        .sheet(item: $shareItem) { payload in
+        ActivityView(activityItems: payload.items)
+        }
+    }
+}
+
+
+// MARK: - Small UI bits you already had (kept lightweight)
+private struct ManageBar: View {
+    @Binding var editMode: EditMode
+    let selectionCount: Int
+    let onToggleEdit: () -> Void
+    let onDeleteSelected: () -> Void
+    let onClearAll: () -> Void
+
+    var body: some View {
+        HStack {
+            Button(action: onClearAll) { Label("Clear All", systemImage: "trash") }.buttonStyle(.bordered)
+            if selectionCount > 0 {
+                Button(action: onDeleteSelected) { Text("Delete (\(selectionCount))") }.buttonStyle(.bordered)
+            }
+            Spacer()
+            Button(action: onToggleEdit) { Text(editMode == .active ? "Done" : "Select") }
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(.horizontal).padding(.vertical, 8)
+        .background(.ultraThinMaterial)
+    }
+}
+
+private struct VisualEffectBlur: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIVisualEffectView { UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial)) }
+    func updateUIView(_ uiView: UIVisualEffectView, context: Context) {}
+}
+
+private struct ActivityView: UIViewControllerRepresentable {
+    let activityItems: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+    }
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+
+

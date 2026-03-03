@@ -1,0 +1,105 @@
+name: CI — Build & Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & Unit Tests
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Select Xcode ──────────────────────────────────────────
+      - name: Select Xcode
+        run: |
+          # Use the latest Xcode available on the runner.
+          XCODE_PATH=$(xcode-select -p)
+          echo "Using Xcode at: $XCODE_PATH"
+          xcodebuild -version
+
+      # ── Stub secrets files so the build doesn't crash ─────────
+      - name: Create stub Secrets.plist files
+        run: |
+          # The project expects Secrets.plist in two locations; copy the example template.
+          cp Secrets.example.plist CapstoneApp/CapstoneApp/Secrets.plist
+          cp Secrets.example.plist Secrets.plist
+
+      # ── Create stub GoogleService-Info.plist for Firebase ──────
+      - name: Create stub GoogleService-Info.plist
+        run: |
+          cat > CapstoneApp/CapstoneApp/GoogleService-Info.plist << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>API_KEY</key>          <string>CI_PLACEHOLDER</string>
+            <key>GCM_SENDER_ID</key>    <string>000000000000</string>
+            <key>PLIST_VERSION</key>    <string>1</string>
+            <key>BUNDLE_ID</key>        <string>com.SipBuddyInc.SipBuddy</string>
+            <key>PROJECT_ID</key>       <string>ci-placeholder</string>
+            <key>STORAGE_BUCKET</key>   <string>ci-placeholder.appspot.com</string>
+            <key>IS_ADS_ENABLED</key>   <false/>
+            <key>IS_ANALYTICS_ENABLED</key> <false/>
+            <key>IS_APPINVITE_ENABLED</key> <false/>
+            <key>IS_GCM_ENABLED</key>   <true/>
+            <key>IS_SIGNIN_ENABLED</key><true/>
+            <key>GOOGLE_APP_ID</key>    <string>1:000000000000:ios:0000000000000000</string>
+          </dict>
+          </plist>
+          PLIST
+
+      # ── Resolve Swift Package Manager dependencies ─────────────
+      - name: Resolve packages
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project CapstoneApp/CapstoneApp.xcodeproj \
+            -scheme CapstoneApp \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm"
+
+      # ── Build for testing ──────────────────────────────────────
+      - name: Build for testing
+        run: |
+          xcodebuild build-for-testing \
+            -project CapstoneApp/CapstoneApp.xcodeproj \
+            -scheme CapstoneApp \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" \
+            -resultBundlePath "$RUNNER_TEMP/build.xcresult" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO | xcpretty && exit ${PIPESTATUS[0]}
+
+      # ── Run unit tests ─────────────────────────────────────────
+      - name: Run unit tests
+        run: |
+          xcodebuild test-without-building \
+            -project CapstoneApp/CapstoneApp.xcodeproj \
+            -scheme CapstoneApp \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" \
+            -resultBundlePath "$RUNNER_TEMP/test.xcresult" \
+            -only-testing:CapstoneAppTests \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO | xcpretty && exit ${PIPESTATUS[0]}
+
+      # ── Upload test results on failure ─────────────────────────
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: ${{ runner.temp }}/*.xcresult
+          retention-days: 7

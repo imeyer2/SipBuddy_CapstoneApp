@@ -1,0 +1,11 @@
+# Secrets — never commit the real file
+Secrets.plist
+
+# Xcode
+*.xcuserstate
+*.xcuserdatad/
+DerivedData/
+build/
+
+# macOS
+.DS_Store
