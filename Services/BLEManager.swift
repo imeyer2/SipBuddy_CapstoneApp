@@ -4,15 +4,26 @@
 //
 //
 
-
 import Foundation
 import CoreBluetooth
 import Combine
 import UIKit
 import CoreLocation   // 👈 add this for CLLocation
 
+// MARK: - Known Device Persistence
+struct KnownDevice: Codable, Identifiable, Equatable {
+    let id: UUID  // peripheral identifier
+    var name: String
+    var lastConnected: Date
+}
+
 final class BLEManager: NSObject, ObservableObject {
     static let shared = BLEManager()
+    
+    // Known devices persistence key
+    private static let knownDevicesKey = "SipBuddy.knownDevices"
+    private static let autoConnectEnabledKey = "SipBuddy.autoConnectEnabled"
+    private static let lastConnectedDeviceKey = "SipBuddy.lastConnectedDevice"
 
     // Public state
     @Published private(set) var isPoweredOn = false
@@ -21,6 +32,46 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var discovered: [CBPeripheral] = []
     @Published var advertisedName: [UUID: String] = [:]
     @Published var lastRSSI: [UUID: Int] = [:]
+    
+    // Known devices (persisted)
+    @Published private(set) var knownDevices: [KnownDevice] = []
+    
+    // Auto-connect settings
+    @Published var autoConnectEnabled: Bool = true {
+        didSet {
+            UserDefaults.standard.set(autoConnectEnabled, forKey: Self.autoConnectEnabledKey)
+            // Avoid using CoreBluetooth before the manager is initialized
+            guard self.central != nil else { return }
+            if autoConnectEnabled {
+                // Re-enable auto reconnect behavior and ensure scanning is active
+                self.userInitiatedDisconnect = false
+                if !self.isConnected && self.isPoweredOn {
+                    self.startBackgroundScanning()
+                }
+            } else {
+                // Disable background scanning and any auto-connect attempts
+                self.isAttemptingAutoConnect = false
+                self.stopScanning()
+            }
+        }
+    }
+    private var lastConnectedDeviceID: UUID? {
+        didSet {
+            if let id = lastConnectedDeviceID {
+                UserDefaults.standard.set(id.uuidString, forKey: Self.lastConnectedDeviceKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.lastConnectedDeviceKey)
+            }
+        }
+    }
+    
+    // Track if user manually disconnected (to avoid immediate auto-reconnect)
+    private var userInitiatedDisconnect = false
+    private var isAttemptingAutoConnect = false
+    // Debounce timer for reconnection attempts
+    private var reconnectDebounceWorkItem: DispatchWorkItem?
+    // Minimum time between auto-connect attempts (prevents rapid connection cycling)
+    private let reconnectDebounceDelay: TimeInterval = 2.0
     
 
     
@@ -104,6 +155,15 @@ final class BLEManager: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        // Load known devices from UserDefaults
+        loadKnownDevices()
+        
+        // Load auto-connect settings
+        autoConnectEnabled = UserDefaults.standard.object(forKey: Self.autoConnectEnabledKey) as? Bool ?? true
+        if let idString = UserDefaults.standard.string(forKey: Self.lastConnectedDeviceKey) {
+            lastConnectedDeviceID = UUID(uuidString: idString)
+        }
+        
         // NEW: restoration + power alert, on cbQueue
         central = CBCentralManager(
             delegate: self,
@@ -113,6 +173,48 @@ final class BLEManager: NSObject, ObservableObject {
                 CBCentralManagerOptionShowPowerAlertKey: true
             ]
         )
+    }
+    
+    // MARK: - Known Devices Persistence
+    private func loadKnownDevices() {
+        guard let data = UserDefaults.standard.data(forKey: Self.knownDevicesKey),
+              let devices = try? JSONDecoder().decode([KnownDevice].self, from: data) else {
+            return
+        }
+        knownDevices = devices.sorted { $0.lastConnected > $1.lastConnected }
+    }
+    
+    private func saveKnownDevices() {
+        guard let data = try? JSONEncoder().encode(knownDevices) else { return }
+        UserDefaults.standard.set(data, forKey: Self.knownDevicesKey)
+    }
+    
+    private func addOrUpdateKnownDevice(identifier: UUID, name: String) {
+        onMain {
+            if let index = self.knownDevices.firstIndex(where: { $0.id == identifier }) {
+                // Update existing device
+                self.knownDevices[index].name = name
+                self.knownDevices[index].lastConnected = Date()
+            } else {
+                // Add new device
+                let device = KnownDevice(id: identifier, name: name, lastConnected: Date())
+                self.knownDevices.append(device)
+            }
+            // Sort by most recently connected
+            self.knownDevices.sort { $0.lastConnected > $1.lastConnected }
+            self.saveKnownDevices()
+        }
+    }
+    
+    /// Check if a device identifier is a known device
+    func isKnownDevice(_ identifier: UUID) -> Bool {
+        knownDevices.contains { $0.id == identifier }
+    }
+    
+    /// Remove a known device (for user management)
+    func removeKnownDevice(_ identifier: UUID) {
+        knownDevices.removeAll { $0.id == identifier }
+        saveKnownDevices()
     }
 
 
@@ -139,7 +241,27 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     func disconnect() {
+        userInitiatedDisconnect = true
         if let p = peripheral { central.cancelPeripheralConnection(p) }
+    }
+    
+    /// Reset the manual disconnect flag to allow auto-connect again
+    func enableAutoReconnect() {
+        userInitiatedDisconnect = false
+        // Restart scanning to trigger auto-connect
+        if !isConnected && isPoweredOn {
+            startBackgroundScanning()
+        }
+    }
+    
+    /// Start background scanning for auto-connect (always runs when not connected)
+    func startBackgroundScanning() {
+        guard isPoweredOn, !isConnected, autoConnectEnabled else { return }
+        nameFilter = "Sip"
+        central.scanForPeripherals(
+            withServices: [BLEUUIDs.service],
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+        )
     }
 
     
@@ -157,6 +279,8 @@ final class BLEManager: NSObject, ObservableObject {
 
     // Timer handle to default to sleep post-connect
     private var defaultSleepWorkItem: DispatchWorkItem?
+    // Timer handle to detect stalled incidents
+    private var stallCheckWorkItem: DispatchWorkItem?
     
     
     private func sendRaw(_ s: String) {
@@ -190,7 +314,7 @@ final class BLEManager: NSObject, ObservableObject {
     private func startPctPolling() {
         stopPctPolling() // idempotent
         let timer = DispatchSource.makeTimerSource(queue: cbQueue)
-        timer.schedule(deadline: .now(), repeating: .seconds(3)) // fire now, then every 3s
+        timer.schedule(deadline: .now(), repeating: .seconds(30)) // fire now, then every 30s
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
             guard self.isConnected else { return }
@@ -208,14 +332,15 @@ final class BLEManager: NSObject, ObservableObject {
     
 
     // MARK: - iOS Notification for low SipBuddy battery
+    // DISABLED: Battery notifications temporarily disabled
     private func onBatteryPercentUpdated(_ pct: Int) {
         // fire once when crossing under 25; reset when back above 30 (hysteresis)
-        if !batteryLowNotified && pct < batteryLowThreshold {
-            batteryLowNotified = true
-            NotificationManager.shared.notifyBatteryLow(percent: pct)
-        } else if batteryLowNotified && pct >= 30 {
-            batteryLowNotified = false
-        }
+        // if !batteryLowNotified && pct < batteryLowThreshold {
+        //     batteryLowNotified = true
+        //     NotificationManager.shared.notifyBatteryLow(percent: pct)
+        // } else if batteryLowNotified && pct >= 30 {
+        //     batteryLowNotified = false
+        // }
     }
         
     
@@ -229,17 +354,35 @@ final class BLEManager: NSObject, ObservableObject {
             let inc = self.incidentStore.startIncident(width: width, height: height, expected: count, location: loc)
             self.currentIncidentID = inc.id
             
-//            self.telemetry?.recordIncidentStart(
-//                imageUUID: inc.id.uuidString,
-//                location: loc,
-//                placeName: inc.placeName
-//            )
-            
-            
-            // NEW: Schedule a local iOS notification only if user is outside the app
-            if UIApplication.shared.applicationState != .active {
-                NotificationManager.shared.notifyIncidentStarted(id: inc.id, placeName: inc.placeName)
+            // Record incident start in telemetry
+            self.telemetry?.recordIncidentStart(
+                imageUUID: inc.id.uuidString,
+                location: loc,
+                placeName: inc.placeName
+            )
+
+            // Schedule a stall check ~12s after start if not complete
+            self.stallCheckWorkItem?.cancel()
+            let stallWork = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                let id = inc.id
+                self.onMain {
+                    if let now = self.incidentStore.incidents.first(where: { $0.id == id }), !now.isComplete {
+                        let stalledAfter: TimeInterval
+                        if let last = now.lastFrameAt {
+                            stalledAfter = last.timeIntervalSince(now.startedAt)
+                        } else {
+                            stalledAfter = Date().timeIntervalSince(now.startedAt)
+                        }
+                        self.telemetry?.recordIncidentStalled(incident: now, stalledAfter: stalledAfter)
+                    }
+                }
             }
+            self.stallCheckWorkItem = stallWork
+            DispatchQueue.main.asyncAfter(deadline: .now() + 12.0, execute: stallWork)
+            
+            // Note: iOS notification is now triggered after 2 frames arrive
+            // (see IncidentStore.appendFrame) to include a GIF preview
             
             
             if let loc {
@@ -286,37 +429,58 @@ final class BLEManager: NSObject, ObservableObject {
             offset += used
             
             
-            // Recieve JPEG and convert to PNG to store
+            // Receive JPEG and convert to PNG to store
             if fr2.done, let jpegData = fr2.takeJPEG(), let id = currentIncidentID {
-                if let img = UIImage(data: jpegData),
-                   let pngData = img.pngData() {
+                let expectedFrames = self.expectedCount
+                let frameSize = jpegData.count
+                
+                // Move image conversion to background thread to avoid blocking BLE queue
+                PerformanceLogger.shared.logQueueDispatch(queue: "imageProcessing", operation: "JPEG→PNG (\(frameSize) bytes)")
+                let conversionStart = CACurrentMediaTime()
+                
+                ThreadingManager.shared.imageProcessing.async { [weak self] in
+                    guard let self = self else { return }
                     
-                    // Publish converted PNG on main
-                    onMain { self.incidentStore.appendFrameUpdatingTimestamp(to: id, png: pngData) }
-
-                    if expectedCount > 0 {
-                        onMain {
-                            let now = self.incidentStore.incidents.first { $0.id == id }
-                            if now?.framesPNG.count == self.expectedCount {
-                                // All frames received! Run ML inference
-                                Log.d("[BLE] All \(self.expectedCount) frames received for incident \(id)")
-                                
-                                if let incident = now {
-                                    // Run ML model on complete frame sequence
-                                    DispatchQueue.global(qos: .userInitiated).async {
-                                        MLInferenceManager.shared.analyzeIncident(incident)
+                    let result = PerformanceLogger.shared.measure("UIImage.pngData") {
+                        if let img = UIImage(data: jpegData) {
+                            return img.pngData()
+                        }
+                        return nil
+                    }
+                    
+                    if let pngData = result {
+                        let conversionTime = (CACurrentMediaTime() - conversionStart) * 1000
+                        PerformanceLogger.shared.logQueueComplete(queue: "imageProcessing", operation: "JPEG→PNG", timeMs: conversionTime)
+                        
+                        // Publish converted PNG on main
+                        ThreadingManager.onMain {
+                            self.incidentStore.appendFrameUpdatingTimestamp(to: id, png: pngData)
+                            
+                            if expectedFrames > 0 {
+                                let now = self.incidentStore.incidents.first { $0.id == id }
+                                if now?.framesPNG.count == expectedFrames {
+                                    // All frames received! Run ML inference
+                                    Log.d("[BLE] All \(expectedFrames) frames received for incident \(id)")
+                                    
+                                    if let incident = now {
+                                        // Run ML model on complete frame sequence
+                                        ThreadingManager.shared.runInference {
+                                            MLInferenceManager.shared.analyzeIncident(incident)
+                                        }
                                     }
+                                    
+                                    self.stallCheckWorkItem?.cancel()
+                                    self.stallCheckWorkItem = nil
+                                    self.bufParser.reset()
+                                    self.fr2.reset()
+                                    self.currentIncidentID = nil
+                                    self.expectedCount = 0
                                 }
-                                
-                                self.bufParser.reset(); self.fr2.reset()
-                                self.currentIncidentID = nil; self.expectedCount = 0
                             }
                         }
+                    } else {
+                        Log.d("[DEBUG] Failed to convert JPEG → PNG for incident \(String(describing: id))")
                     }
-                } else {
-                    
-//                    print("[DEBUG] Failed to convert JPEG → PNG for incident \(String(describing: currentIncidentID))")
-                    Log.d("[DEBUG] Failed to convert JPEG → PNG for incident \(String(describing: currentIncidentID))")
                 }
             } else {
                 break
@@ -346,7 +510,16 @@ final class BLEManager: NSObject, ObservableObject {
             bgTask = .invalid
         }
         startPctPolling()       // when app is active, begin polling
-
+        
+        // Reset userInitiatedDisconnect when app becomes active (fresh session)
+        // This enables AirPods-like auto-connect when user opens the app
+        userInitiatedDisconnect = false
+        
+        // Start scanning to auto-connect to last known device if not connected
+        if !isConnected && isPoweredOn && autoConnectEnabled {
+            Log.d("[BLE] App became active - starting background scan for auto-connect")
+            startBackgroundScanning()
+        }
     }
     
     
@@ -374,7 +547,10 @@ final class BLEManager: NSObject, ObservableObject {
 extension BLEManager: CBCentralManagerDelegate, CBPeripheralDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         onMain { self.isPoweredOn = (central.state == .poweredOn) }
-        if isPoweredOn { startScanning(filter: nameFilter) }
+        if central.state == .poweredOn {
+            // Start background scanning only when auto-connect is enabled
+            if self.autoConnectEnabled { startBackgroundScanning() }
+        }
     }
 
 //    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String : Any]) {
@@ -469,8 +645,23 @@ extension BLEManager: CBCentralManagerDelegate, CBPeripheralDelegate {
                 self.discovered.append(peripheral)
             }
         }
+        
+        // Auto-connect to last known device when enabled
+        // Only auto-connect to devices the user has previously manually paired with
+        if self.autoConnectEnabled,
+           !self.isConnected,
+           !self.isAttemptingAutoConnect,
+           !self.userInitiatedDisconnect,
+           let lastID = self.lastConnectedDeviceID,
+           peripheral.identifier == lastID,
+           self.isKnownDevice(peripheral.identifier) {
+            // Cancel any pending debounce and start new connection attempt
+            self.reconnectDebounceWorkItem?.cancel()
+            self.isAttemptingAutoConnect = true
+            Log.d("[BLE] Auto-connecting to known device: \(peripheral.name ?? peripheral.identifier.uuidString)")
+            self.connect(peripheral)
+        }
     }
-    
     
     
     
@@ -478,9 +669,13 @@ extension BLEManager: CBCentralManagerDelegate, CBPeripheralDelegate {
     
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        let deviceDisplayName = advertisedName[peripheral.identifier] ?? peripheral.name ?? "SipBuddy"
+        
         onMain {
             self.deviceName = peripheral.name
             self.isConnected = true
+            self.isAttemptingAutoConnect = false
+            self.userInitiatedDisconnect = false  // Reset on successful connect
             
             // On connect setup metadata and send telemetry
             let meta: [String: String] = [
@@ -488,20 +683,45 @@ extension BLEManager: CBCentralManagerDelegate, CBPeripheralDelegate {
                 "peripheral_id": peripheral.identifier.uuidString
             ]
             self.telemetry?.startConnectionSession(meta: meta)
-
+            
+            // Update user properties for PostHog segmentation
+            self.telemetry?.updateUserPropertiesOnConnect(
+                deviceName: deviceDisplayName,
+                knownDeviceCount: self.knownDevices.count
+            )
         }
+        
+        // Save to known devices and track as last connected
+        addOrUpdateKnownDevice(identifier: peripheral.identifier, name: deviceDisplayName)
+        lastConnectedDeviceID = peripheral.identifier
+        
+        // Increment total connections counter
+        let ud = UserDefaults.standard
+        let total = ud.integer(forKey: "SB.total_connections") + 1
+        ud.set(total, forKey: "SB.total_connections")
+        
         startPctPolling()   // <--- add
 
         peripheral.discoverServices([BLEUUIDs.service])
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        onMain { self.isConnected = false }
+        onMain {
+            self.isConnected = false
+            self.isAttemptingAutoConnect = false
+        }
+        // Resume scanning to try again
+        startBackgroundScanning()
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        // Capture device name before clearing it
+        let disconnectedDeviceName = self.deviceName
+        let wasUserInitiated = self.userInitiatedDisconnect
+        
         onMain {
             self.isConnected = false
+            self.isAttemptingAutoConnect = false
             
              
             self.telemetry?.endConnectionSession() // End the connection session
@@ -515,7 +735,25 @@ extension BLEManager: CBCentralManagerDelegate, CBPeripheralDelegate {
         txText = nil; txFrame = nil; rxBasic = nil; rxCam = nil; rxMode = nil
         bufParser.reset(); fr2.reset(); currentIncidentID = nil; expectedCount = 0
         camCfgSent = false
-        startScanning(filter: nameFilter)
+        
+        // Resume background scanning for auto-reconnect (with debounce to avoid rapid cycling)
+        // Only reconnect if user didn't manually disconnect
+        if self.autoConnectEnabled && !wasUserInitiated {
+            // Send notification for unexpected disconnect
+            NotificationManager.shared.notifyUnexpectedDisconnect(deviceName: disconnectedDeviceName)
+            
+            reconnectDebounceWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                Log.d("[BLE] Starting background scan for auto-reconnect after disconnect")
+                self.startBackgroundScanning()
+            }
+            reconnectDebounceWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + reconnectDebounceDelay, execute: work)
+        } else if self.autoConnectEnabled {
+            // User manually disconnected - just keep scanning but don't auto-reconnect
+            startBackgroundScanning()
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
@@ -541,12 +779,13 @@ extension BLEManager: CBCentralManagerDelegate, CBPeripheralDelegate {
         sendPing()
         if !camCfgSent { camCfgSent = true; sendCameraConfig() }
 
-        // ---- NEW: default to Sleep 2s after a fresh connect ----
+        // Default to Detect 2s after a fresh connect
         defaultSleepWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.sendSleep()
-            NotificationCenter.default.post(name: .forceDefaultSleep, object: nil)
+            self.sendDetect()
+            // Notify UI/homepage to switch to Detect mode
+            NotificationCenter.default.post(name: .forceDefaultDetect, object: nil)
         }
         defaultSleepWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: work)
@@ -603,6 +842,14 @@ extension BLEManager: CBCentralManagerDelegate, CBPeripheralDelegate {
                             }
                         }
 
+//                        // Legacy format: just a number
+//                        if let val = Int(trimmed), (-10...110).contains(val) {
+//                            let clamped = min(100, max(0, val))
+//                            onMain {
+//                                self.batteryPercent = clamped
+//                                // leave isCharging as-is (unknown) when legacy reply arrives
+//                            }
+//                        }
                         
                         
                     }
@@ -621,5 +868,9 @@ extension BLEManager: CBCentralManagerDelegate, CBPeripheralDelegate {
 
 extension Notification.Name {
     static let didStartIncident = Notification.Name("SB.didStartIncident")
-    static let forceDefaultSleep = Notification.Name("SB.forceDefaultSleep")   // NEW
+    // Deprecated: kept for backward compatibility if any observers still exist
+    static let forceDefaultSleep = Notification.Name("SB.forceDefaultSleep")
+    // New: signal UI to switch to Detect mode after connection/config
+    static let forceDefaultDetect = Notification.Name("SB.forceDefaultDetect")
 }
+

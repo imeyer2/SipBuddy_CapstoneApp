@@ -3,7 +3,7 @@
 //  SipBuddy
 //
 //  Bridge between Firebase Auth and Telemetry System
-//  Syncs Firebase user data (email, UID) with telemetry
+//  Syncs Firebase user data (email, UID) with telemetry (PostHog)
 //
 
 import Foundation
@@ -15,7 +15,7 @@ extension AuthStateManager {
     func syncWithTelemetry(identityStore: UserIdentityStore) {
         guard let currentUser = currentUser,
               let profile = userProfile else {
-            Log.d("[Telemetry] Cannot sync - no user profile available")
+            Log.d("[PostHog] Cannot sync - no user profile available")
             return
         }
         
@@ -27,7 +27,7 @@ extension AuthStateManager {
             lastName: profile.lastName
         )
         
-        Log.d("[Telemetry] Synced Firebase user: \(profile.email)")
+        Log.d("[PostHog] Synced Firebase user: \(profile.email)")
     }
     
     /// Get user ID for telemetry (Firebase UID)
@@ -46,41 +46,4 @@ extension AuthStateManager {
     }
 }
 
-// MARK: - Automatic Sync Helper
-
-extension TelemetryManager {
-    /// Sync telemetry with Firebase auth state
-    /// Call this when auth state changes
-    func syncWithFirebaseAuth(_ authManager: AuthStateManager) {
-        guard authManager.isAuthenticated else {
-            Log.d("[Telemetry] User not authenticated, skipping sync")
-            return
-        }
-        
-        authManager.syncWithTelemetry(identityStore: identity)
-        registerUserIfReady()
-    }
-}
-
-// MARK: - Usage in SipBuddy_PilotApp.swift
-/*
- 
- Add this to your app's body to auto-sync on auth changes:
- 
- .onChange(of: authManager.isAuthenticated) { _, isAuthenticated in
-     if isAuthenticated {
-         // Sync Firebase user with telemetry
-         telemetry.syncWithFirebaseAuth(authManager)
-     }
- }
- 
- Or in onAppear:
- 
- .onAppear {
-     // Sync if already authenticated
-     if authManager.isAuthenticated {
-         telemetry.syncWithFirebaseAuth(authManager)
-     }
- }
- 
-*/
+// Note: TelemetryManager.syncWithFirebaseAuth is now defined in PostHogService.swift

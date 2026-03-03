@@ -21,6 +21,7 @@ final class AuthStateManager: ObservableObject {
         let email: String
         let firstName: String?
         let lastName: String?
+        var createdAt: Date = Date()  // Track when user was created
         
         var fullName: String {
             if let first = firstName, let last = lastName {
@@ -124,5 +125,59 @@ final class AuthStateManager: ObservableObject {
             lastName: lastName
         )
         saveUserProfile(profile)
+    }
+    
+    // MARK: - Account Deletion
+    enum DeleteAccountError: LocalizedError {
+        case notAuthenticated
+        case reauthenticationRequired
+        case missingEmail
+        case missingPassword
+
+        var errorDescription: String? {
+            switch self {
+            case .notAuthenticated: return "You must be signed in to delete your account."
+            case .reauthenticationRequired: return "Please re-enter your password to confirm account deletion."
+            case .missingEmail: return "Your account has no email address associated."
+            case .missingPassword: return "Please enter your password."
+            }
+        }
+    }
+
+    /// Deletes the currently signed-in Firebase user. If Firebase requires recent login, this method
+    /// will attempt password reauthentication when a password is provided.
+    /// - Parameter password: The user's current password (for email/password accounts). Optional; if omitted and reauth is required, an error is thrown.
+    @MainActor
+    func deleteAccount(password: String?) async throws {
+        guard let user = Auth.auth().currentUser else { throw DeleteAccountError.notAuthenticated }
+
+        func performDelete() async throws {
+            try await user.delete()
+            // Clear local profile data
+            UserDefaults.standard.removeObject(forKey: "SB.userProfile")
+            self.userProfile = nil
+            self.currentUser = nil
+            self.isAuthenticated = false
+            Log.d("[AUTH] Account deleted and local profile cleared")
+        }
+
+        do {
+            try await performDelete()
+            return
+        } catch {
+            let nserr = error as NSError
+            // Check Firebase Auth error domain and map raw code to AuthErrorCode
+            if nserr.domain == "FIRAuthErrorDomain",
+               let code = AuthErrorCode(rawValue: nserr.code), code == .requiresRecentLogin {
+                // Reauth needed
+                guard let email = user.email else { throw DeleteAccountError.missingEmail }
+                guard let pwd = password, !pwd.isEmpty else { throw DeleteAccountError.reauthenticationRequired }
+                let credential = EmailAuthProvider.credential(withEmail: email, password: pwd)
+                try await user.reauthenticate(with: credential)
+                try await performDelete()
+            } else {
+                throw error
+            }
+        }
     }
 }

@@ -14,11 +14,9 @@ import UIKit
 
 // MARK: - Config
 enum TelemetryConfig {
-    // TODO: set to your Azure URL (no trailing slash), e.g. "https://sipbuddy-api-12345.azurewebsites.net"
-    static let baseURL = URL(string: "https://sipbuddy-telemetry.azurewebsites.net")!
-    // If you turned on API key on the server, set it here
+    static let baseURL = SecretsManager.telemetryBaseURL
     static let apiKeyHeader = "x-api-key"
-    static let apiKeyValue = "1234567890"
+    static let apiKeyValue = SecretsManager.telemetryAPIKey
 
     // Heartbeat cadence (seconds)
     static let heartbeatSeconds: TimeInterval = 180
