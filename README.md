@@ -31,6 +31,7 @@
 - [Project Structure](#project-structure)
 - [CI / CD](#ci--cd)
 - [Testing](#testing)
+- [Release Notes](#release-notes)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -356,6 +357,80 @@ xcodebuild test \
 - Use the existing `Log` utility for structured logging
 - Place new services in `Services/`, new utilities in `Utilities/`, new views in `Views/`
 - All BLE data processing should happen on `ThreadingManager` queues, never the main thread
+
+---
+
+## Release Notes
+
+### What's Working in This Submission
+
+#### BLE Device Connection & Management
+- **Scanning & pairing** — Discover nearby BLE peripherals via CoreBluetooth and connect with a single tap from the Device Picker sheet.
+- **Known-device memory** — Previously paired devices are persisted in `UserDefaults`, sorted most-recent-first, and auto-reconnected on launch (configurable via the auto-connect toggle).
+- **State restoration** — `CBCentralManagerOptionRestoreIdentifierKey` enables the system to reconnect to the device even after the app is terminated.
+- **Battery monitoring** — Real-time battery percentage and charging-state readout from the hardware, with low-battery local notifications.
+- **Device commands** — Send `DETECT`, `SLEEP`, `START`, `PING`, and `PCTCHG` commands over the Nordic UART Service.
+
+#### Incident Capture & Playback
+- **Streaming binary protocol** — The full `SigFinder → BUFHeaderParser → FR2Assembler` pipeline reliably reassembles JPEG frames from chunked BLE packets, including edge cases (fragmented headers, zero-length payloads, overlapping signatures).
+- **Progressive incident recording** — Frames are collected in real time with width, height, expected-frame-count metadata, and reverse-geocoded location (friendly place name).
+- **On-device persistence** — Incidents are saved as binary Property Lists in Application Support; they survive app restarts. Disk writes are coalesced with a 300 ms debounce to prevent thrashing during rapid frame streams.
+- **Incident list UI** — Swipe-to-delete, clear-all, animated empty state, and a live elapsed-time ticker.
+- **Detail viewer** — Frame-by-frame scrubbing with animated GIF generation (`GIFEncoder`) for sharing.
+- **Cloud backup** — Incident media (GIF/PNG) uploaded to Azure Blob Storage via SAS tokens.
+
+#### Buddy System
+- **Contact import** — Add trusted contacts directly from the iOS address book via `ContactsUI`.
+- **Delivery modes** — Per-contact toggle between "Auto-send" (Twilio SMS webhook) and "Ask first" (pre-filled iMessage composer with incident GIF attached).
+- **Incident-triggered alerts** — When an incident completes, a `BuddyPayload` is generated and the configured delivery mode fires automatically.
+
+#### SipMap
+- **Proximity radar** — MapKit view centered on the user's location with concentric distance rings (immediate < 1.5 m, near 1.5–5 m, far 5 m+).
+- **Burst BLE scanning** — Rapid device discovery with RSSI-based distance estimation; devices sorted strongest-signal-first.
+- **Location services** — Precise `CoreLocation` tracking with reverse geocoding for incident tagging.
+
+#### Authentication & Profile
+- **Firebase Auth** — Email/password sign-up, sign-in, and password reset flows.
+- **Profile management** — View and edit first/last name; view email and UID.
+- **Account deletion** — GDPR-compliant self-serve account removal with reauthentication prompt.
+- **First-run onboarding** — Name-entry sheet on first launch; Welcome screen after successful auth.
+
+#### Notifications
+- **Local push notifications** — Time-sensitive alerts with image thumbnails for incidents, battery warnings, and unexpected BLE disconnects.
+- **Haptic feedback** — Tactile alerts (`UIImpactFeedbackGenerator`, `UINotificationFeedbackGenerator`) on connection, mode changes, and incidents.
+- **Duplicate suppression** — Each incident is notified only once.
+
+#### Dynamic Island / Live Activity
+- **ActivityKit integration** — Live Activity showing the current device mode (Detect / Sleep) on the Lock Screen and Dynamic Island.
+- **Real-time updates** — Mode changes push state updates to the activity; activity ends on disconnect.
+
+#### Analytics & Telemetry
+- **PostHog** — Product analytics with session replay (screenshot mode), event capture, screen tracking, and user property sync.
+- **Azure telemetry** — Heartbeat, connection lifecycle, mode changes, and incident events streamed to the backend API.
+- **Firebase ↔ PostHog bridge** — Auth state synced to PostHog for unified identity tracking.
+- **In-app feedback** — Free-text feedback form that sends to the telemetry backend.
+
+#### Secrets Management
+- **Git-ignored plist** — All API keys live in `Secrets.plist` (never committed). `Secrets.example.plist` provides a safe template.
+- **SecretsManager** — Enum-based loader reads the plist from the app bundle at runtime; `fatalError` on missing file guides new developers.
+
+#### CI / CD
+- **GitHub Actions** — Automated build and unit-test pipeline on every push/PR to `main` and `develop` (macOS 15, Xcode, iPhone 16 Simulator).
+- **Stub secrets** — CI copies `Secrets.example.plist` and generates a placeholder `GoogleService-Info.plist` so the build never fails due to missing secrets.
+- **Artifact upload** — `.xcresult` bundles uploaded on failure for debugging.
+
+#### Testing
+- **Unit tests** — `KnownDevice` codable round-trip, `BLEManager` persistence & removal, auto-connect toggle, notification name guards.
+- **Parser tests** — Full coverage of `SigFinder`, `BUFHeaderParser`, and `FR2Assembler` including fragmentation, overlapping signatures, zero-length payloads, and post-done consumption.
+- **UI tests** — Sign-up and login flow automation against Firebase Auth, launch screenshot capture across UI configurations, and launch-performance benchmarking.
+
+### Known Limitations
+
+| Area | Status |
+|------|--------|
+| **On-device ML classification** | Infrastructure scaffolded (`MLInferenceManager` with CoreML/Vision/Metal pipeline) but running simulated inference — no trained model shipped yet. |
+| **Tutorial / onboarding walkthrough** | Removed; `TutorialView` is a no-op placeholder. |
+| **UI tests in CI** | Unit tests run in CI; UI tests require a simulator with Firebase credentials and are skipped via `XCTSkip` when env vars are absent. |
 
 ---
 
