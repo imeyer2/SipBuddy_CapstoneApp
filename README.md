@@ -364,6 +364,11 @@ xcodebuild test \
 
 ### What's Working in This Submission
 
+#### Added UI Pages
+- Added Home Screen, Incidents Page and Array, Landing Page, Login Page, Sign Up page, SipMap (prototype), and Buddy System (prototype)
+- Connectivity of BLE devices page (pop up window)
+- Navigation bars at the top and bottom for ease of use
+
 #### BLE Device Connection & Management
 - **Scanning & pairing** — Discover nearby BLE peripherals via CoreBluetooth and connect with a single tap from the Device Picker sheet.
 - **Known-device memory** — Previously paired devices are persisted in `UserDefaults`, sorted most-recent-first, and auto-reconnected on launch (configurable via the auto-connect toggle).
@@ -393,22 +398,16 @@ xcodebuild test \
 - **Firebase Auth** — Email/password sign-up, sign-in, and password reset flows.
 - **Profile management** — View and edit first/last name; view email and UID.
 - **Account deletion** — GDPR-compliant self-serve account removal with reauthentication prompt.
-- **First-run onboarding** — Name-entry sheet on first launch; Welcome screen after successful auth.
 
 #### Notifications
 - **Local push notifications** — Time-sensitive alerts with image thumbnails for incidents, battery warnings, and unexpected BLE disconnects.
 - **Haptic feedback** — Tactile alerts (`UIImpactFeedbackGenerator`, `UINotificationFeedbackGenerator`) on connection, mode changes, and incidents.
 - **Duplicate suppression** — Each incident is notified only once.
 
-#### Dynamic Island / Live Activity
-- **ActivityKit integration** — Live Activity showing the current device mode (Detect / Sleep) on the Lock Screen and Dynamic Island.
-- **Real-time updates** — Mode changes push state updates to the activity; activity ends on disconnect.
-
 #### Analytics & Telemetry
 - **PostHog** — Product analytics with session replay (screenshot mode), event capture, screen tracking, and user property sync.
 - **Azure telemetry** — Heartbeat, connection lifecycle, mode changes, and incident events streamed to the backend API.
 - **Firebase ↔ PostHog bridge** — Auth state synced to PostHog for unified identity tracking.
-- **In-app feedback** — Free-text feedback form that sends to the telemetry backend.
 
 #### Secrets Management
 - **Git-ignored plist** — All API keys live in `Secrets.plist` (never committed). `Secrets.example.plist` provides a safe template.
