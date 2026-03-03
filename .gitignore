@@ -1,5 +1,6 @@
 # Secrets — never commit the real file
 Secrets.plist
+GoogleService-Info.plist
 
 # Xcode
 *.xcuserstate
